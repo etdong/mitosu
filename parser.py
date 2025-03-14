@@ -48,13 +48,15 @@ def parse_beatmap(beatmapid: str):
     timing_line = get_line('[TimingPoints]')
     hit_line = get_line('[HitObjects]')
 
+    if not any([metadata_line, difficulty_line, events_line, timing_line, hit_line]):
+        return None
 
-    metadata_list = osu[metadata_line:difficulty_line-1]
-    difficulty_list = osu[difficulty_line:events_line-1]
-    timingpoints_list = osu[timing_line:hit_line-1]
-    hitobject_list = osu[hit_line:]
+    metadata_list = osu[metadata_line:difficulty_line-1] if metadata_line and difficulty_line else []
+    difficulty_list = osu[difficulty_line:events_line-1] if difficulty_line and events_line else []
+    timingpoints_list = osu[timing_line:hit_line-1] if timing_line and hit_line else []
+    hitobject_list = osu[hit_line:] if hit_line else []
 
-    # filling information
+    # filling informationsss
     for item in metadata_list:
         if ':' in item:
             item = item.split(':')

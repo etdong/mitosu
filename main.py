@@ -3,11 +3,13 @@ import numpy as np
 import ossapi
 import ossapi.models
 import parser
-import csv
+
+import threading
+
 from dotenv import load_dotenv
 from jump import JumpAnalyzer
 from stream import StreamAnalyzer
-from model import get_weights
+from model import create_model
 
 class BeatmapData:
     length: int
@@ -17,69 +19,192 @@ class BeatmapData:
     cs: float
     hpd: float
     bpm: float
-    jump_confidence: float
-    stream_confidence: float
-    playcount: int
+    jump: float
+    stream: float
+    pp: float
+    acc: float
 
 load_dotenv()
 
 client_id = os.getenv("CLIENT_ID")
 client_secret = os.getenv("CLIENT_SECRET")
+db_username = os.getenv("DB_USERNAME")
+db_password = os.getenv("DB_PASSWORD")
 api = ossapi.Ossapi(client_id, client_secret)
 
-# gets the top 1000 most played beatmaps of the player and writes the relevant info to a csv file
-player = api.user("h0mygod")
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
+uri = f"mongodb+srv://{db_username}:{db_password}@mitosu.t6p1o.mongodb.net/?retryWrites=true&w=majority&appName=mitosu"
+# Create a new client and connect to the server
+client = MongoClient(uri, server_api=ServerApi('1'))
 
-with open("data.csv", "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["name", "length", "stars", "od", "ar", "cs", "hpd", "bpm", "jump_confidence", "stream_confidence", "playcount"])
-    for offset in range(0, 1000, 100):
-        plays = api.user_beatmaps(player.id, type="most_played", limit=100, offset=offset)
-        for play in plays:
-            plays = play.count
-            beatmap = play.beatmap().expand()
-            parsed = parser.parse_beatmap(beatmap.id)
-            # analyze the beatmap for whether it is a jump or stream map
-            jump_analysis = JumpAnalyzer(parsed).analyze(beatmap.bpm)
-            stream_analysis = StreamAnalyzer(parsed).analyze(beatmap.bpm)
-            writer.writerow([parsed.metadata["Title"].strip(),
-                            beatmap.total_length, 
-                            beatmap.difficulty_rating, 
-                            beatmap.accuracy, beatmap.ar, 
-                            beatmap.cs, 
-                            beatmap.drain, 
-                            beatmap.bpm, 
-                            jump_analysis.overall_confidence, 
-                            stream_analysis.overall_confidence, 
-                            plays])
-            print(f"Processed {beatmap.id}")
+# gets the top 1000 most played beatmaps of the player and writes the relevant info to db
+def get_player_plays_data(player: ossapi.User):
+    try:
+        users_col = client["users"]["osu"]
+        beatmaps_col = client["beatmaps"]["osu"]
+        played = []
+        for offset in range(0, 1000, 100):
+            plays = api.user_beatmaps(player.id, type="most_played", limit=100, offset=offset)
+            for play in plays:
+                beatmap = play.beatmap().expand()
+                doc = beatmaps_col.find_one({"beatmap_id": beatmap.id})
+                if not doc:
+                    parsed = parser.parse_beatmap(beatmap.id)
+                    if not parsed:
+                        continue
+                    # analyze the beatmap for whether it is a jump or stream map
+                    jump_analysis = JumpAnalyzer(parsed).analyze(beatmap.bpm)
+                    stream_analysis = StreamAnalyzer(parsed).analyze(beatmap.bpm)
+                    beatmap_info = {"beatmap_id": beatmap.id,
+                                    "length": beatmap.total_length, 
+                                    "starts": beatmap.difficulty_rating, 
+                                    "od": beatmap.accuracy, 
+                                    "ar": beatmap.ar, 
+                                    "cs": beatmap.cs, 
+                                    "hpd": beatmap.drain, 
+                                    "bpm": beatmap.bpm, 
+                                    "jump": jump_analysis.overall_confidence, 
+                                    "stream": stream_analysis.overall_confidence}
+                    beatmaps_col.insert_one(beatmap_info)
+                played.append(beatmap.id)
+                print(f"Processed {beatmap.id}; {len(played)}/1000")
+        users_col.update_one({"user_id": player.id}, {"$set": {"played": played}}, upsert=True)
+    except Exception as e:
+        print(e)
 
-# train the linear regression model on the data.csv and get the best resulting weights
-w = get_weights()
+def get_player_top_plays(player: ossapi.User):
+    try:
+        db = client["beatmaps"]
+        col = db["osu"]
+        top_plays = []
+        plays = api.user_scores(player.id, type="best", limit=100)
+        for score in plays:
+            beatmap = score.beatmap
+            doc = col.find_one({"beatmap_id": beatmap.id})
+            if doc:
+                doc["pp"] = score.pp
+                doc["acc"] = score.accuracy
+                top_plays.append(doc)
+            else:
+                parsed = parser.parse_beatmap(beatmap.id)
+                # analyze the beatmap for whether it is a jump or stream map
+                jump_analysis = JumpAnalyzer(parsed).analyze(beatmap.bpm)
+                stream_analysis = StreamAnalyzer(parsed).analyze(beatmap.bpm)
+                beatmap_info = {"beatmap_id": beatmap.id,
+                                "length": beatmap.total_length, 
+                                "starts": beatmap.difficulty_rating, 
+                                "od": beatmap.accuracy, 
+                                "ar": beatmap.ar, 
+                                "cs": beatmap.cs, 
+                                "hpd": beatmap.drain, 
+                                "bpm": beatmap.bpm, 
+                                "jump": jump_analysis.overall_confidence, 
+                                "stream": stream_analysis.overall_confidence}
+                col.update_one({"beatmap_id": beatmap.id}, {"$set": beatmap_info}, upsert=True)
+                beatmap_info["pp"] = score.pp
+                beatmap_info["acc"] = score.accuracy
+                top_plays.append(beatmap_info)
+            print(f"Processed {beatmap.id}; {len(top_plays)}/100")
+        return top_plays
+    except Exception as e:
+        print(e)
 
-# get the top N most played beatmap sets and recommend them based on the weights.
-# WARNING: This will take a long time to run.
-recommendations = []
-n = 1000
-beatmapsets = api.search_beatmapsets(sort="plays_desc").beatmapsets
-for beatmapset in beatmapsets[:1000]:
-    for i in beatmapset.beatmaps:
-        beatmap = i.expand()
-        parsed = parser.parse_beatmap(beatmap.id)
-        jump_analysis = JumpAnalyzer(parsed).analyze(beatmap.bpm)
-        stream_analysis = StreamAnalyzer(parsed).analyze(beatmap.bpm)
-        vec = np.array([1,
-                        beatmap.total_length, 
-                        beatmap.difficulty_rating, 
-                        beatmap.accuracy, beatmap.ar, 
-                        beatmap.cs, 
-                        beatmap.drain, 
-                        beatmap.bpm, 
-                        jump_analysis.overall_confidence, 
-                        stream_analysis.overall_confidence])
-        recommendations.append((np.dot(vec, w)[0], beatmap.id))
+def process_beatmap_batch(beatmapsets_batch: list[ossapi.Beatmapset], page: int):
+    try:
+        db = client["beatmaps"]
+        beatmap_col = db["osu"]
+        batch = []
+        print(f"START processing page {page}")
+        for beatmapset in beatmapsets_batch:
+            for i in beatmapset.beatmaps:
+                beatmap = i.expand()
+                parsed = parser.parse_beatmap(beatmap.id)
+                # analyze the beatmap for whether it is a jump or stream map
+                jump_analysis = JumpAnalyzer(parsed).analyze(beatmap.bpm)
+                stream_analysis = StreamAnalyzer(parsed).analyze(beatmap.bpm)
+                batch.append({"beatmap_id": beatmap.id,
+                                "length": beatmap.total_length, 
+                                "starts": beatmap.difficulty_rating, 
+                                "od": beatmap.accuracy,
+                                "ar": beatmap.ar, 
+                                "cs": beatmap.cs, 
+                                "hpd": beatmap.drain, 
+                                "bpm": beatmap.bpm, 
+                                "jump": jump_analysis.overall_confidence, 
+                                "stream": stream_analysis.overall_confidence})
+            print(f"Processed beatmapset {i}/50 on page {page}")
+        beatmap_col.insert_many(batch)
+        print(f"FINISH processed page {page}")
+    except Exception as e:
+        print(e)
 
-# sort the recommendations by the resulting score
-reccs_sorted = sorted(recommendations, key=lambda x: x[0], reverse=True)
-# print the top 10 recommendations
-print(reccs_sorted[:10])
+def get_beatmap_data(num_pages: int):
+    beatmapsets_res = api.search_beatmapsets(sort="plays_desc")
+    for page in range(0, num_pages):
+        if beatmapsets_res:
+            beatmapsets_batch = beatmapsets_res.beatmapsets
+            threading.Thread(target=process_beatmap_batch, args=(beatmapsets_batch, page)).start()
+        beatmapsets_res = api.search_beatmapsets(sort="plays_desc", cursor=beatmapsets_res.cursor)
+
+def get_training_data(user: ossapi.User):
+    try:
+        users_col = client["users"]["osu"]
+        beatmaps_col = client["beatmaps"]["osu"]
+
+        user_data = users_col.find_one({"user_id": user.id})
+        if not user_data:
+            return None
+
+        played_ids = user_data["played"]
+
+        played = list(beatmaps_col.find({"beatmap_id": {"$in": played_ids}}))
+        played_ = np.array([[i["length"], i["starts"], i["od"], i["ar"], i["cs"], i["hpd"], i["bpm"], i["jump"], i["stream"], 1] for i in played])
+
+        not_played = list(beatmaps_col.find({"beatmap_id": {"$nin": played_ids}}).limit(len(played_ids)))
+        not_played_ = np.array([[i["length"], i["starts"], i["od"], i["ar"], i["cs"], i["hpd"], i["bpm"], i["jump"], i["stream"], 0] for i in not_played])
+
+
+        samples = np.concatenate((played_, not_played_))
+        np.random.shuffle(samples)
+        return samples   
+    except Exception as e:
+        print(e)
+
+
+
+
+if __name__ == "__main__":
+    data = get_training_data(api.user("h0mygod"))
+
+    X = data[:, :-1]
+    y = data[:, -1]
+
+    print(X.shape, y.shape)
+
+    X = (X - np.mean(X, axis=0)) / np.std(X, axis=0)
+    y = (y - np.mean(y)) / np.std(y)
+    
+    X_ = np.concatenate((np.ones([X.shape[0], 1]), X), axis=1)
+
+    training_cutoff = int(X_.shape[0] * 0.6)
+    validation_cutoff = int(X_.shape[0] * 0.8)
+
+    X_train = X_[:training_cutoff]
+    y_train = y[:training_cutoff]
+
+    X_val = X_[training_cutoff:validation_cutoff]
+    y_val = y[training_cutoff:validation_cutoff]
+
+    X_test = X_[validation_cutoff:]
+    y_test = y[validation_cutoff:]
+
+    model = create_model((X_.shape[1],))
+
+    print(X_train.shape, y_train.shape)
+
+    model.fit(X_train, y_train, epochs=100, batch_size=1, validation_data=(X_val, y_val))
+    res = model.evaluate(X_test, y_test)
+    prediction = model.predict(X_test)
+
+    print(prediction)
