@@ -1,7 +1,6 @@
 import os
 import numpy as np
 import ossapi
-import ossapi.models
 import parser
 
 import threading

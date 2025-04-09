@@ -1,85 +1,47 @@
 import os
 import numpy as np
+from linear_regression import train
+from utils import get_training_data
+
 import ossapi
-import ossapi.models
-import parser
-import csv
-from dotenv import load_dotenv
-from jump import JumpAnalyzer
-from stream import StreamAnalyzer
-from linear_regression import get_weights
-
-class BeatmapData:
-    length: int
-    stars: float
-    od: float
-    ar: float
-    cs: float
-    hpd: float
-    bpm: float
-    jump_confidence: float
-    stream_confidence: float
-    playcount: int
-
-load_dotenv()
 
 client_id = os.getenv("CLIENT_ID")
 client_secret = os.getenv("CLIENT_SECRET")
 api = ossapi.Ossapi(client_id, client_secret)
 
-# gets the top 1000 most played beatmaps of the player and writes the relevant info to a csv file
-player = api.user("h0mygod")
 
-with open("data.csv", "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["name", "length", "stars", "od", "ar", "cs", "hpd", "bpm", "jump_confidence", "stream_confidence", "playcount"])
-    for offset in range(0, 1000, 100):
-        plays = api.user_beatmaps(player.id, type="most_played", limit=100, offset=offset)
-        for play in plays:
-            plays = play.count
-            beatmap = play.beatmap().expand()
-            parsed = parser.parse_beatmap(beatmap.id)
-            # analyze the beatmap for whether it is a jump or stream map
-            jump_analysis = JumpAnalyzer(parsed).analyze(beatmap.bpm)
-            stream_analysis = StreamAnalyzer(parsed).analyze(beatmap.bpm)
-            writer.writerow([parsed.metadata["Title"].strip(),
-                            beatmap.total_length, 
-                            beatmap.difficulty_rating, 
-                            beatmap.accuracy, beatmap.ar, 
-                            beatmap.cs, 
-                            beatmap.drain, 
-                            beatmap.bpm, 
-                            jump_analysis.overall_confidence, 
-                            stream_analysis.overall_confidence, 
-                            plays])
-            print(f"Processed {beatmap.id}")
+if __name__ == "__main__":
+    data = get_training_data(api.user("h0mygod"))
 
-# train the linear regression model on the data.csv and get the best resulting weights
-w = get_weights()
+    X = data[:, :-1]
+    y = data[:, -1]
 
-# get the top N most played beatmap sets and recommend them based on the weights.
-# WARNING: This will take a long time to run.
-recommendations = []
-n = 1000
-beatmapsets = api.search_beatmapsets(sort="plays_desc").beatmapsets
-for beatmapset in beatmapsets[:1000]:
-    for i in beatmapset.beatmaps:
-        beatmap = i.expand()
-        parsed = parser.parse_beatmap(beatmap.id)
-        jump_analysis = JumpAnalyzer(parsed).analyze(beatmap.bpm)
-        stream_analysis = StreamAnalyzer(parsed).analyze(beatmap.bpm)
-        vec = np.array([1,
-                        beatmap.total_length, 
-                        beatmap.difficulty_rating, 
-                        beatmap.accuracy, beatmap.ar, 
-                        beatmap.cs, 
-                        beatmap.drain, 
-                        beatmap.bpm, 
-                        jump_analysis.overall_confidence, 
-                        stream_analysis.overall_confidence])
-        recommendations.append((np.dot(vec, w)[0], beatmap.id))
+    print(X.shape, y.shape)
 
-# sort the recommendations by the resulting score
-reccs_sorted = sorted(recommendations, key=lambda x: x[0], reverse=True)
-# print the top 10 recommendations
-print(reccs_sorted[:10])
+    X = (X - np.mean(X, axis=0)) / np.std(X, axis=0)
+    y = (y - np.mean(y)) / np.std(y)
+    
+    X_ = np.concatenate((np.ones([X.shape[0], 1]), X), axis=1)
+
+    training_cutoff = int(X_.shape[0] * 0.6)
+    validation_cutoff = int(X_.shape[0] * 0.8)
+
+    X_train = X_[:training_cutoff]
+    y_train = y[:training_cutoff]
+
+    X_val = X_[training_cutoff:validation_cutoff]
+    y_val = y[training_cutoff:validation_cutoff]
+
+    X_test = X_[validation_cutoff:]
+    y_test = y[validation_cutoff:]
+
+    epoch_best, w_best, losses_train = train(X_train, y_train, X_val, y_val)
+
+    # Perform test by the weights yielding the best validation performance
+    y_hat = np.dot(X_test, w_best)
+    test_risk = np.mean(np.abs(y_hat - y_test))
+
+    print('epoch_best: ', epoch_best)
+    print('test_risk: ', test_risk)
+    print('w_best: ', w_best)
+    
