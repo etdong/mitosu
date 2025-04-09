@@ -45,9 +45,6 @@ def get_weights():
                 gradient = np.dot(X_batch.T, (y_hat_batch - y_batch)) / batch_size
                 w -= alpha * gradient
                 
-            # 1. Compute the training loss by averaging loss_this_epoch
-            # 2. Perform validation on the validation set by the risk
-            # 3. Keep track of the best validation epoch, risk, and the weights
             losses_train.append(loss_this_epoch / N_train)
             _, _, risk_val = predict(X_val, w, y_val)
             risks_val.append(risk_val)

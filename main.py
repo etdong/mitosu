@@ -7,7 +7,7 @@ import csv
 from dotenv import load_dotenv
 from jump import JumpAnalyzer
 from stream import StreamAnalyzer
-from model import get_weights
+from linear_regression import get_weights
 
 class BeatmapData:
     length: int
