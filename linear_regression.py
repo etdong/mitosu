@@ -11,9 +11,8 @@ def get_weights():
 
         y_hat = np.dot(X, w)
         loss = np.mean((y_hat - y) ** 2)
-        risk = np.mean(np.abs(y_hat - y))
 
-        return y_hat, loss, risk
+        return y_hat, loss
 
     # training function
     def train(X_train, y_train, X_val, y_val):
@@ -24,11 +23,9 @@ def get_weights():
         # w: (d+1)x1
 
         losses_train = []
-        risks_val = []
 
         w_best = None
         epoch_best = 0
-        risk_best = 10000
 
         for epoch in range(MaxIter):
 
@@ -46,19 +43,8 @@ def get_weights():
                 w -= alpha * gradient
                 
             losses_train.append(loss_this_epoch / N_train)
-            _, _, risk_val = predict(X_val, w, y_val)
-            risks_val.append(risk_val)
-            if risk_val < risk_best:
-                risk_best = risk_val
-                w_best = w
-                epoch_best = epoch
 
-        return risk_best, epoch_best, w_best, losses_train, risks_val
-
-    # reading beatmap data
-    with open("data.csv", "r") as f:
-        reader = csv.reader(f)
-        data = list(reader)
+        return epoch_best, w_best, losses_train
 
     # making features and labels
     X = np.array([np.array([float(val) for val in entry[1:-1]]) for entry in data[1:]])
@@ -92,14 +78,13 @@ def get_weights():
     batch_size = 20    # batch size
     MaxIter = 100        # Maximum iteration
 
-    risk_best, epoch_best, w_best, losses_train, risks_val = train(X_train, y_train, X_val, y_val)
+    epoch_best, w_best, losses_train = train(X_train, y_train, X_val, y_val)
 
     # Perform test by the weights yielding the best validation performance
     y_hat = np.dot(X_test, w_best)
     test_risk = np.mean(np.abs(y_hat - y_test))
 
     print('epoch_best: ', epoch_best)
-    print('risk_best: ', risk_best)
     print('test_risk: ', test_risk)
     print('w_best: ', w_best)
     return w_best
